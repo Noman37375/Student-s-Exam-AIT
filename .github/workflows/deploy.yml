@@ -24,6 +24,8 @@ jobs:
           context: .
           push: true
           tags: nomanusman/students-exam:latest
+          build-args: |
+            DATABASE_URL=${{ secrets.DATABASE_URL }}
 
       - name: Deploy to EC2
         uses: appleboy/ssh-action@v1
