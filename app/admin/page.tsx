@@ -2,6 +2,7 @@
 
 import { useState, useEffect, useCallback } from "react";
 import Link from "next/link";
+import { openMarksheet, downloadClassReportCSV } from "@/lib/marksheet";
 
 /* ─── Types ─────────────────────────────────────────────── */
 interface SessionRow { id: string; studentName: string; studentId: string | null; score: number | null; totalMarks: number; submittedAt: string | null; resultVisible: boolean; }
@@ -222,6 +223,14 @@ export default function AdminPage() {
     else flash(data.error);
   }
 
+  /* ── Marksheet ── */
+  async function openSessionMarksheet(sessionId: string, examTitle: string) {
+    const res  = await fetch(`/api/exam/result/${sessionId}`, { headers: headers(token) });
+    if (!res.ok) { flash("Could not load result for marksheet."); return; }
+    const data = await res.json();
+    openMarksheet(data, examTitle);
+  }
+
   /* ── Announce ── */
   async function announce(mode: "all" | "single", sessionId?: string, visible = true) {
     setBusy(mode === "all" ? "all" : sessionId ?? null);
@@ -291,7 +300,7 @@ export default function AdminPage() {
 
   /* ══ Stats ══ */
   const announced = sessions.filter((s) => s.resultVisible).length;
-  const passed    = sessions.filter((s) => s.score !== null && s.score >= 25).length;
+  const passed    = sessions.filter((s) => s.score !== null && s.score >= Math.ceil(s.totalMarks * 0.5)).length;
   const avgScore  = sessions.length ? Math.round(sessions.reduce((a, s) => a + (s.score ?? 0), 0) / sessions.length) : 0;
   const activeCount = configs.filter((c) => c.isActive).length;
 
@@ -407,9 +416,22 @@ export default function AdminPage() {
 
           {/* Table */}
           <div className="bg-white rounded-2xl border border-slate-200 shadow-sm overflow-hidden">
-            <div className="px-5 py-4 border-b border-slate-100 flex items-center justify-between">
-              <h2 className="font-black text-slate-900">Submitted Exams</h2>
-              <span className="text-xs font-semibold text-slate-400 bg-slate-100 px-2.5 py-1 rounded-full">{sessions.length} students</span>
+            <div className="px-5 py-4 border-b border-slate-100 flex items-center justify-between gap-3 flex-wrap">
+              <div className="flex items-center gap-3">
+                <h2 className="font-black text-slate-900">Submitted Exams</h2>
+                <span className="text-xs font-semibold text-slate-400 bg-slate-100 px-2.5 py-1 rounded-full">{sessions.length} students</span>
+              </div>
+              {sessions.length > 0 && (
+                <button
+                  onClick={() => downloadClassReportCSV(sessions, `report_${username}`)}
+                  className="inline-flex items-center gap-2 px-4 py-2 bg-gradient-to-r from-violet-600 to-indigo-600 text-white font-bold rounded-xl hover:from-violet-700 hover:to-indigo-700 text-xs shadow-sm transition-all"
+                >
+                  <svg className="w-3.5 h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                    <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M12 10v6m0 0l-3-3m3 3l3-3M3 17V7a2 2 0 012-2h6l2 2h6a2 2 0 012 2v8a2 2 0 01-2 2H5a2 2 0 01-2-2z" />
+                  </svg>
+                  Download Class Report (CSV)
+                </button>
+              )}
             </div>
             {sessions.length === 0 ? (
               <div className="py-16 text-center"><p className="text-4xl mb-3">📭</p><p className="text-slate-500 font-medium">No submissions yet</p></div>
@@ -417,14 +439,16 @@ export default function AdminPage() {
               <div className="overflow-x-auto">
                 <table className="w-full text-sm">
                   <thead><tr className="bg-slate-50 border-b border-slate-100">
-                    {["#", "Student", "Student ID", "Score", "Result", "Status", "Action", ...(isSuperAdmin ? ["Delete"] : [])].map((h) => (
+                    {["#", "Student", "Student ID", "Score", "Result", "Status", "Marksheet", "Action", ...(isSuperAdmin ? ["Delete"] : [])].map((h) => (
                       <th key={h} className="px-4 py-3 text-xs font-bold text-slate-500 uppercase tracking-wide text-left">{h}</th>
                     ))}
                   </tr></thead>
                   <tbody className="divide-y divide-slate-50">
                     {sessions.map((s, i) => {
-                      const pct = s.score !== null ? Math.round((s.score / s.totalMarks) * 100) : null;
-                      const ok  = s.score !== null && s.score >= 25;
+                      const pct      = s.score !== null ? Math.round((s.score / s.totalMarks) * 100) : null;
+                      const passScore = Math.ceil(s.totalMarks * 0.5);
+                      const ok       = s.score !== null && s.score >= passScore;
+                      const examTitle = configs.find((c) => true)?.title ?? "Exam";
                       return (
                         <tr key={s.id} className="hover:bg-slate-50/80 transition-colors">
                           <td className="px-4 py-3 text-slate-400 font-medium">{i + 1}</td>
@@ -439,6 +463,12 @@ export default function AdminPage() {
                           <td className="px-4 py-3 text-center">{s.resultVisible
                             ? <span className="inline-flex items-center gap-1 text-xs font-bold text-green-700 bg-green-100 px-2.5 py-1 rounded-full"><span className="w-1.5 h-1.5 bg-green-500 rounded-full" />Announced</span>
                             : <span className="inline-flex items-center gap-1 text-xs font-bold text-amber-700 bg-amber-100 px-2.5 py-1 rounded-full"><span className="w-1.5 h-1.5 bg-amber-500 rounded-full" />Pending</span>}</td>
+                          <td className="px-4 py-3 text-center">
+                            <button onClick={() => openSessionMarksheet(s.id, examTitle)}
+                              className="px-3 py-1.5 bg-violet-50 text-violet-700 rounded-lg text-xs font-bold hover:bg-violet-100 transition-colors">
+                              📄 Marksheet
+                            </button>
+                          </td>
                           <td className="px-4 py-3 text-center">
                             <button onClick={() => announce("single", s.id, !s.resultVisible)} disabled={busy !== null}
                               className={`px-3 py-1.5 rounded-lg text-xs font-bold transition-all disabled:opacity-50 ${s.resultVisible ? "bg-slate-100 text-slate-600 hover:bg-slate-200" : "bg-gradient-to-r from-green-500 to-emerald-500 text-white hover:from-green-600 hover:to-emerald-600 shadow-sm"}`}>
