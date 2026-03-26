@@ -120,12 +120,18 @@ async function fetchTypeBatch(
   teacherPrompt: string,
   count: number,
   batchIndex = 0,
+  recentQuestions: string[] = [],
 ): Promise<GeneratedQuestion[]> {
   const hint     = BATCH_HINTS[batchIndex % 3];
   const temp     = BATCH_TEMPS[batchIndex % 3];
   const builder  = getPromptBuilder(type);
   const schema   = getSchema(type);
-  const prompt   = `${builder(teacherPrompt, count)}\n\nBATCH INSTRUCTION: ${hint}\n\nCRITICAL: Return ONLY a raw JSON array of exactly ${count} objects. No markdown.`;
+
+  const avoidSection = recentQuestions.length > 0
+    ? `\n\nAVOID questions that cover the exact same specific concept as any of these recently used questions (create fresh variety):\n${recentQuestions.map((q, i) => `${i + 1}. ${q}`).join("\n")}`
+    : "";
+
+  const prompt   = `${builder(teacherPrompt, count)}${avoidSection}\n\nBATCH INSTRUCTION: ${hint}\n\nCRITICAL: Return ONLY a raw JSON array of exactly ${count} objects. No markdown.`;
 
   const parse = (r: string) => {
     const cleaned = r.replace(/```json\s*/gi, "").replace(/```\s*/gi, "").trim();
@@ -150,6 +156,7 @@ async function fetchTypeBatch(
 export async function generateAllQuestions(
   teacherPrompt: string | null | undefined,
   questionConfig?: QuestionConfig | null,
+  recentQuestions: string[] = [],
 ): Promise<GeneratedQuestion[]> {
   if (!teacherPrompt) throw new Error("No exam configuration provided.");
 
@@ -188,7 +195,7 @@ export async function generateAllQuestions(
   // Run all batches in parallel
   const results = await Promise.all(
     jobs.map(({ type, count, batchIdx: bi, marks }) =>
-      fetchTypeBatch(type, teacherPrompt, count, bi).then((qs) =>
+      fetchTypeBatch(type, teacherPrompt, count, bi, recentQuestions).then((qs) =>
         qs.map((q) => ({ ...q, type, marks }))
       )
     )

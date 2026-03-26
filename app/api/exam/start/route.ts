@@ -72,8 +72,17 @@ export async function POST(req: NextRequest) {
 
     const sessionId = session.id;
 
+    // Fetch recently used questions to reduce repetition across sessions
+    const recentRows = await db.query.examQuestions.findMany({
+      columns: { question: true },
+      orderBy: (q, { desc }) => [desc(q.id)],
+      limit: 60,
+    });
+    // Trim to first 80 chars each so the prompt stays compact
+    const recentQuestions = recentRows.map((r) => r.question.slice(0, 80));
+
     // Generate questions
-    const questions = await generateAllQuestions(teacherPrompt, questionConfig);
+    const questions = await generateAllQuestions(teacherPrompt, questionConfig, recentQuestions);
 
     // Insert questions with type + marks
     await db.insert(examQuestions).values(
