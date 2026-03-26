@@ -3,10 +3,65 @@ import { NextRequest, NextResponse } from "next/server";
 export const maxDuration = 60;
 
 import { z } from "zod";
+import { eq, and, sql } from "drizzle-orm";
 import { db } from "@/lib/db";
-import { examSessions, examQuestions } from "@/drizzle/schema";
-import { generateAllQuestions } from "@/lib/llm";
-import type { QuestionConfig } from "@/lib/prompts";
+import { examSessions, examQuestions, questionBank } from "@/drizzle/schema";
+import { generateAllQuestions, type GeneratedQuestion } from "@/lib/llm";
+import type { QuestionConfig, QuestionTypeKey } from "@/lib/prompts";
+
+// ─── Bank helpers ────────────────────────────────────────────────────────────
+
+type QConfigMap = Record<string, { count: number; marksEach: number }>;
+
+async function checkBankSufficiency(configId: string, questionConfig: QConfigMap): Promise<boolean> {
+  const VALID = new Set(["mcq", "true_false", "fill_blank", "code"]);
+  const types = Object.keys(questionConfig).filter((t) => VALID.has(t));
+  for (const typeKey of types) {
+    const needed = questionConfig[typeKey]?.count ?? 0;
+    const [{ cnt }] = await db
+      .select({ cnt: sql<number>`cast(count(*) as int)` })
+      .from(questionBank)
+      .where(and(eq(questionBank.configId, configId), eq(questionBank.type, typeKey)));
+    if ((cnt ?? 0) < needed) return false;
+  }
+  return true;
+}
+
+function shuffleArr<T>(arr: T[]): T[] {
+  for (let i = arr.length - 1; i > 0; i--) {
+    const j = Math.floor(Math.random() * (i + 1));
+    [arr[i], arr[j]] = [arr[j], arr[i]];
+  }
+  return arr;
+}
+
+async function pickFromBank(configId: string, questionConfig: QConfigMap): Promise<GeneratedQuestion[]> {
+  const VALID = new Set(["mcq", "true_false", "fill_blank", "code"]);
+  const types = Object.keys(questionConfig).filter((t) => VALID.has(t));
+  const picked: GeneratedQuestion[] = [];
+
+  for (const typeKey of types) {
+    const cfg = questionConfig[typeKey];
+    const allRows = await db.select().from(questionBank)
+      .where(and(eq(questionBank.configId, configId), eq(questionBank.type, typeKey)));
+    const selected = shuffleArr(allRows).slice(0, cfg.count);
+    for (const row of selected) {
+      picked.push({
+        type:           typeKey as QuestionTypeKey,
+        topic:          row.topic,
+        question:       row.question,
+        marks:          cfg.marksEach,
+        option_a:       row.optionA   ?? undefined,
+        option_b:       row.optionB   ?? undefined,
+        option_c:       row.optionC   ?? undefined,
+        option_d:       row.optionD   ?? undefined,
+        correct_answer: row.correctAnswer || undefined,
+        model_answer:   row.modelAnswer  ?? undefined,
+      });
+    }
+  }
+  return shuffleArr(picked);
+}
 
 const StartSchema = z.object({
   studentName: z.string().min(2).max(100).trim(),
@@ -72,17 +127,27 @@ export async function POST(req: NextRequest) {
 
     const sessionId = session.id;
 
-    // Fetch recently used questions to reduce repetition across sessions
-    const recentRows = await db.query.examQuestions.findMany({
-      columns: { question: true },
-      orderBy: (q, { desc }) => [desc(q.id)],
-      limit: 60,
-    });
-    // Trim to first 80 chars each so the prompt stays compact
-    const recentQuestions = recentRows.map((r) => r.question.slice(0, 80));
+    // Use question bank if available and sufficient, otherwise fall back to LLM
+    let questions: GeneratedQuestion[];
 
-    // Generate questions
-    const questions = await generateAllQuestions(teacherPrompt, questionConfig, recentQuestions);
+    const bankAvailable = configId && questionConfig
+      ? await checkBankSufficiency(configId, questionConfig as QConfigMap)
+      : false;
+
+    if (bankAvailable) {
+      questions = await pickFromBank(configId!, questionConfig as QConfigMap);
+    } else {
+      const recentRows = await db.query.examQuestions.findMany({
+        columns: { question: true },
+        orderBy: (q, { desc }) => [desc(q.id)],
+        limit: 60,
+      });
+      questions = await generateAllQuestions(
+        teacherPrompt,
+        questionConfig,
+        recentRows.map((r) => r.question.slice(0, 80)),
+      );
+    }
 
     // Insert questions with type + marks
     await db.insert(examQuestions).values(

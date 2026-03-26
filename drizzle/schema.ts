@@ -57,3 +57,18 @@ export const examConfigs = pgTable("exam_configs", {
   questionConfig:  jsonb("question_config"),
   totalMarks:      integer("total_marks"),
 });
+
+export const questionBank = pgTable("question_bank", {
+  id:            uuid("id").primaryKey().default(sql`gen_random_uuid()`),
+  configId:      uuid("config_id").notNull().references(() => examConfigs.id, { onDelete: "cascade" }),
+  type:          text("type").notNull(),
+  topic:         text("topic").notNull(),
+  question:      text("question").notNull(),
+  optionA:       text("option_a"),
+  optionB:       text("option_b"),
+  optionC:       text("option_c"),
+  optionD:       text("option_d"),
+  correctAnswer: text("correct_answer").notNull().default(""),
+  modelAnswer:   text("model_answer"),
+  createdAt:     timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+});

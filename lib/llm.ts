@@ -221,3 +221,41 @@ export async function generateAllQuestions(
 
   return shuffle(questions.slice(0, totalNeeded));
 }
+
+// ─── Bank generation (large batches with controlled concurrency) ─────────────
+
+const BANK_BATCH_SIZE = 20;   // questions per LLM call
+const BANK_CONCURRENCY = 5;   // max parallel calls at once
+
+export async function generateBankQuestions(
+  type: QuestionTypeKey,
+  count: number,
+  teacherPrompt: string,
+  existingQuestions: string[] = [],
+  marksEach = 2,
+): Promise<GeneratedQuestion[]> {
+  const totalBatches = Math.ceil(count / BANK_BATCH_SIZE);
+  const jobs = Array.from({ length: totalBatches }, (_, i) => {
+    const batchCount = i === totalBatches - 1
+      ? count - i * BANK_BATCH_SIZE
+      : BANK_BATCH_SIZE;
+    return { batchCount, batchIndex: i };
+  });
+
+  const results: GeneratedQuestion[] = [];
+  const avoidList = [...existingQuestions];
+
+  for (let i = 0; i < jobs.length; i += BANK_CONCURRENCY) {
+    const chunk = jobs.slice(i, i + BANK_CONCURRENCY);
+    const chunkResults = await Promise.all(
+      chunk.map(({ batchCount, batchIndex }) =>
+        fetchTypeBatch(type, teacherPrompt, batchCount, batchIndex, avoidList)
+      )
+    );
+    const flat = chunkResults.flat().map((q) => ({ ...q, type, marks: marksEach }));
+    results.push(...flat);
+    avoidList.push(...flat.map((q) => q.question.slice(0, 80)));
+  }
+
+  return deduplicateQuestions(results);
+}

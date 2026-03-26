@@ -64,6 +64,20 @@ interface ExamConfig {
   totalMarks: number | null;
 }
 
+interface BankQuestion {
+  id: string;
+  topic: string;
+  question: string;
+  type: string;
+  optionA?: string | null;
+  optionB?: string | null;
+  optionC?: string | null;
+  optionD?: string | null;
+  correctAnswer: string;
+  modelAnswer?: string | null;
+}
+interface BankSummary { counts: Record<string, number>; total: number; }
+
 type Tab = "dashboard" | "configs" | "users" | "students";
 
 /* ─── Helpers ────────────────────────────────────────────── */
@@ -111,6 +125,13 @@ export default function AdminPage() {
   const [editingId,   setEditingId]   = useState<string | null>(null);
   const [editForm,    setEditForm]    = useState({ title: "", prompt: "", qconfig: DEFAULT_QCONFIG });
   const [editBusy,    setEditBusy]    = useState(false);
+
+  const [bankPanelId,   setBankPanelId]   = useState<string | null>(null);
+  const [bankSummary,   setBankSummary]   = useState<Record<string, BankSummary>>({});
+  const [bankQuestions, setBankQuestions] = useState<Record<string, Record<string, BankQuestion[]>>>({});
+  const [bankViewType,  setBankViewType]  = useState<string | null>(null);
+  const [bankGenBusy,   setBankGenBusy]   = useState(false);
+  const [bankGenCounts, setBankGenCounts] = useState<Partial<Record<string, number>>>({});
 
   function flash(msg: string) { setToast(msg); setTimeout(() => setToast(""), 3500); }
 
@@ -296,6 +317,83 @@ export default function AdminPage() {
     if (res.ok) { flash("Config updated!"); setEditingId(null); fetchConfigs(token); }
     else flash(data.error);
     setEditBusy(false);
+  }
+
+  /* ── Question Bank ── */
+  async function fetchBankSummary(configId: string) {
+    const res = await fetch(`/api/admin/question-bank/${configId}`, { headers: headers(token) });
+    if (res.ok) {
+      const data = await res.json();
+      setBankSummary((prev) => ({ ...prev, [configId]: data }));
+    }
+  }
+
+  async function fetchBankType(configId: string, type: string) {
+    const res = await fetch(`/api/admin/question-bank/${configId}?type=${type}`, { headers: headers(token) });
+    if (res.ok) {
+      const data = await res.json();
+      setBankQuestions((prev) => ({
+        ...prev,
+        [configId]: { ...(prev[configId] ?? {}), [type]: data.questions },
+      }));
+    }
+  }
+
+  async function generateBank(configId: string, customCounts: Partial<Record<string, number>>) {
+    setBankGenBusy(true);
+    const body: Record<string, unknown> = {};
+    if (Object.keys(customCounts).length > 0) body.counts = customCounts;
+    const res  = await fetch(`/api/admin/question-bank/${configId}/generate`, {
+      method: "POST", headers: headers(token), body: JSON.stringify(body),
+    });
+    const data = await res.json();
+    if (res.ok) {
+      flash(`Bank generated! Added: ${Object.entries(data.added).map(([t, n]) => `${n} ${t}`).join(", ")}`);
+      fetchBankSummary(configId);
+    } else {
+      flash(data.error ?? "Generation failed.");
+    }
+    setBankGenBusy(false);
+  }
+
+  async function deleteBankQuestion(configId: string, id: string, type: string) {
+    const res = await fetch(`/api/admin/question-bank/${configId}`, {
+      method: "DELETE", headers: headers(token), body: JSON.stringify({ id }),
+    });
+    if (res.ok) {
+      setBankQuestions((prev) => ({
+        ...prev,
+        [configId]: {
+          ...(prev[configId] ?? {}),
+          [type]: (prev[configId]?.[type] ?? []).filter((q) => q.id !== id),
+        },
+      }));
+      fetchBankSummary(configId);
+      flash("Question deleted.");
+    }
+  }
+
+  async function clearBank(configId: string) {
+    if (!confirm("Delete all questions from this bank? This cannot be undone.")) return;
+    const res = await fetch(`/api/admin/question-bank/${configId}`, {
+      method: "DELETE", headers: headers(token), body: JSON.stringify({ all: true }),
+    });
+    if (res.ok) {
+      setBankSummary((prev) => ({ ...prev, [configId]: { counts: {}, total: 0 } }));
+      setBankQuestions((prev) => ({ ...prev, [configId]: {} }));
+      flash("Bank cleared.");
+    }
+  }
+
+  function openBankPanel(configId: string) {
+    if (bankPanelId === configId) {
+      setBankPanelId(null);
+      setBankViewType(null);
+    } else {
+      setBankPanelId(configId);
+      setBankViewType(null);
+      fetchBankSummary(configId);
+    }
   }
 
   /* ══ Stats ══ */
@@ -677,6 +775,10 @@ export default function AdminPage() {
                               <button onClick={() => deleteConfig(c.id)}
                                 className="px-3 py-1.5 bg-red-50 text-red-600 rounded-lg text-xs font-bold hover:bg-red-100 transition-colors">Delete</button>
                             )}
+                            <button onClick={() => openBankPanel(c.id)}
+                              className={`px-3 py-1.5 rounded-lg text-xs font-bold transition-colors ${bankPanelId === c.id ? "bg-violet-100 text-violet-700" : "bg-slate-100 text-slate-600 hover:bg-slate-200"}`}>
+                              🗃 Bank
+                            </button>
                           </div>
                         </div>
                         {expandedId === c.id && (
@@ -685,6 +787,113 @@ export default function AdminPage() {
                             <p className="text-sm text-slate-700 whitespace-pre-wrap leading-relaxed">{c.generatedPrompt}</p>
                           </div>
                         )}
+                        {bankPanelId === c.id && (() => {
+                          const summary = bankSummary[c.id];
+                          const qcfg = (c.questionConfig as Record<string, { count: number; marksEach: number }> | null) ?? {};
+                          const enabledTypes = Object.keys(qcfg).filter(t => ["mcq","true_false","fill_blank","code"].includes(t));
+                          const TYPE_LABELS: Record<string, string> = { mcq: "MCQ", true_false: "True/False", fill_blank: "Fill Blank", code: "Code" };
+
+                          return (
+                            <div className="mt-3 border border-violet-200 rounded-xl bg-violet-50/30 p-4 space-y-4">
+                              <div className="flex items-center justify-between">
+                                <p className="text-xs font-bold text-violet-700 uppercase tracking-wide">Question Bank</p>
+                                <div className="flex gap-2">
+                                  {summary && summary.total > 0 && (
+                                    <button onClick={() => clearBank(c.id)}
+                                      className="text-xs px-3 py-1.5 bg-red-50 text-red-600 rounded-lg font-semibold hover:bg-red-100 transition-colors">
+                                      Clear All
+                                    </button>
+                                  )}
+                                  <button onClick={() => generateBank(c.id, bankGenCounts)} disabled={bankGenBusy}
+                                    className="text-xs px-3 py-1.5 bg-violet-600 text-white rounded-lg font-bold hover:bg-violet-700 disabled:opacity-50 transition-colors flex items-center gap-1.5">
+                                    {bankGenBusy && <span className="w-3 h-3 border-2 border-white/30 border-t-white rounded-full animate-spin" />}
+                                    {bankGenBusy ? "Generating..." : summary && summary.total > 0 ? "Add More" : "Generate Bank"}
+                                  </button>
+                                </div>
+                              </div>
+
+                              {/* Custom counts form */}
+                              <div className="grid grid-cols-2 gap-2 sm:grid-cols-4">
+                                {enabledTypes.map((typeKey) => {
+                                  const def = ({ mcq: 200, true_false: 200, fill_blank: 100, code: 100 } as Record<string, number>)[typeKey] ?? 100;
+                                  return (
+                                    <div key={typeKey} className="bg-white rounded-lg border border-slate-200 p-2.5">
+                                      <p className="text-xs text-slate-500 font-medium mb-1">{TYPE_LABELS[typeKey] ?? typeKey}</p>
+                                      <div className="flex items-center gap-1">
+                                        <input type="number" min={10} max={500}
+                                          placeholder={String(def)}
+                                          value={bankGenCounts[typeKey] ?? ""}
+                                          onChange={(e) => setBankGenCounts(p => ({ ...p, [typeKey]: parseInt(e.target.value) || def }))}
+                                          className="w-full px-2 py-1 rounded-lg border border-slate-200 text-xs text-center font-bold focus:border-violet-400 focus:outline-none"
+                                        />
+                                        <span className="text-xs text-slate-400">qs</span>
+                                      </div>
+                                      {summary && (
+                                        <p className={`text-xs font-bold mt-1 ${(summary.counts[typeKey] ?? 0) > 0 ? "text-green-600" : "text-slate-400"}`}>
+                                          {summary.counts[typeKey] ?? 0} in bank
+                                        </p>
+                                      )}
+                                    </div>
+                                  );
+                                })}
+                              </div>
+
+                              {/* Status bar */}
+                              {!summary && <p className="text-xs text-slate-400 text-center">Loading bank stats...</p>}
+                              {summary && summary.total === 0 && (
+                                <p className="text-xs text-amber-600 bg-amber-50 border border-amber-100 rounded-lg px-3 py-2 text-center">
+                                  No questions in bank yet. Generate one for instant exam starts.
+                                </p>
+                              )}
+                              {summary && summary.total > 0 && (
+                                <p className="text-xs text-green-700 bg-green-50 border border-green-200 rounded-lg px-3 py-2 text-center font-medium">
+                                  ✓ {summary.total} questions in bank — students get instant exam starts
+                                </p>
+                              )}
+
+                              {/* Per-type question viewer */}
+                              {summary && summary.total > 0 && (
+                                <div className="space-y-2">
+                                  <p className="text-xs font-bold text-slate-500 uppercase tracking-wide">View / Delete Questions</p>
+                                  <div className="flex gap-2 flex-wrap">
+                                    {enabledTypes.filter(t => (summary.counts[t] ?? 0) > 0).map((typeKey) => (
+                                      <button key={typeKey}
+                                        onClick={() => {
+                                          const next = bankViewType === typeKey ? null : typeKey;
+                                          setBankViewType(next);
+                                          if (next) fetchBankType(c.id, typeKey);
+                                        }}
+                                        className={`text-xs px-3 py-1.5 rounded-lg font-bold transition-colors ${bankViewType === typeKey ? "bg-slate-800 text-white" : "bg-slate-100 text-slate-600 hover:bg-slate-200"}`}>
+                                        {TYPE_LABELS[typeKey] ?? typeKey} ({summary.counts[typeKey]})
+                                      </button>
+                                    ))}
+                                  </div>
+
+                                  {bankViewType && bankQuestions[c.id]?.[bankViewType] && (
+                                    <div className="max-h-72 overflow-y-auto border border-slate-200 rounded-xl bg-white divide-y divide-slate-100">
+                                      {bankQuestions[c.id][bankViewType].map((q) => (
+                                        <div key={q.id} className="flex items-start gap-3 px-3 py-2.5">
+                                          <div className="flex-1 min-w-0">
+                                            <p className="text-xs font-semibold text-slate-500 mb-0.5">{q.topic}</p>
+                                            <p className="text-xs text-slate-800 leading-snug">{q.question}</p>
+                                          </div>
+                                          <button onClick={() => deleteBankQuestion(c.id, q.id, bankViewType)}
+                                            className="text-red-400 hover:text-red-600 text-xs flex-shrink-0 p-1 hover:bg-red-50 rounded transition-colors">
+                                            ✕
+                                          </button>
+                                        </div>
+                                      ))}
+                                    </div>
+                                  )}
+
+                                  {bankViewType && !bankQuestions[c.id]?.[bankViewType] && (
+                                    <p className="text-xs text-slate-400 text-center py-3">Loading...</p>
+                                  )}
+                                </div>
+                              )}
+                            </div>
+                          );
+                        })()}
                       </>
                     )}
                   </div>
