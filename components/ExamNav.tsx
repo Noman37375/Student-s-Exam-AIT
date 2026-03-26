@@ -1,15 +1,13 @@
 "use client";
 
-import type { AnswerOption } from "@/types/exam";
-
 interface ExamNavProps {
-  currentIndex: number;
+  currentIndex:   number;
   totalQuestions: number;
-  answers: Record<string, AnswerOption>;
-  questionIds: string[];
-  onNavigate: (index: number) => void;
-  onPrev: () => void;
-  onNext: () => void;
+  answers:        Record<string, string>;
+  questionIds:    string[];
+  onNavigate:     (index: number) => void;
+  onPrev:         () => void;
+  onNext:         () => void;
 }
 
 export default function ExamNav({

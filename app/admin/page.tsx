@@ -5,8 +5,63 @@ import Link from "next/link";
 
 /* ─── Types ─────────────────────────────────────────────── */
 interface SessionRow { id: string; studentName: string; studentId: string | null; score: number | null; totalMarks: number; submittedAt: string | null; resultVisible: boolean; }
-interface AdminUser   { id: string; username: string; createdAt: string; }
-interface ExamConfig  { id: string; title: string; description: string; generatedPrompt: string; createdBy: string; isActive: boolean; createdAt: string; }
+interface AdminUser  { id: string; username: string; createdAt: string; }
+
+type QTypeKey = "mcq" | "trueFalse" | "fillBlank" | "code";
+type QTypeState = { enabled: boolean; count: number; marksEach: number };
+type QConfig    = Record<QTypeKey, QTypeState>;
+
+const QTYPES: { key: QTypeKey; label: string; icon: string }[] = [
+  { key: "mcq",       label: "Multiple Choice (MCQ)",  icon: "◉" },
+  { key: "trueFalse", label: "True / False",            icon: "T/F" },
+  { key: "fillBlank", label: "Fill in the Blank",       icon: "___" },
+  { key: "code",      label: "Coding Question",         icon: "</>" },
+];
+
+const DEFAULT_QCONFIG: QConfig = {
+  mcq:       { enabled: true,  count: 40, marksEach: 2 },
+  trueFalse: { enabled: false, count: 10, marksEach: 1 },
+  fillBlank: { enabled: false, count: 5,  marksEach: 2 },
+  code:      { enabled: false, count: 2,  marksEach: 5 },
+};
+
+function calcTotal(qc: QConfig) {
+  return (Object.values(qc) as QTypeState[]).filter((v) => v.enabled).reduce((s, v) => s + v.count * v.marksEach, 0);
+}
+
+// UI keys (camelCase) ↔ DB/LLM keys (snake_case)
+const KEY_TO_DB:   Record<QTypeKey, string>  = { mcq: "mcq", trueFalse: "true_false", fillBlank: "fill_blank", code: "code" };
+const KEY_FROM_DB: Record<string, QTypeKey>  = { mcq: "mcq", true_false: "trueFalse", fill_blank: "fillBlank", code: "code" };
+
+function toQConfig(stored: Record<string, { count: number; marksEach: number }> | null | undefined): QConfig {
+  if (!stored) return DEFAULT_QCONFIG;
+  const result: QConfig = {
+    mcq:       { ...DEFAULT_QCONFIG.mcq,       enabled: false },
+    trueFalse: { ...DEFAULT_QCONFIG.trueFalse, enabled: false },
+    fillBlank: { ...DEFAULT_QCONFIG.fillBlank, enabled: false },
+    code:      { ...DEFAULT_QCONFIG.code,      enabled: false },
+  };
+  for (const [dbKey, val] of Object.entries(stored)) {
+    const uiKey = KEY_FROM_DB[dbKey];
+    if (uiKey && val) result[uiKey] = { enabled: true, ...val };
+  }
+  return result;
+}
+
+function fromQConfig(qc: QConfig): Record<string, { count: number; marksEach: number }> {
+  const out: Record<string, { count: number; marksEach: number }> = {};
+  for (const [k, v] of Object.entries(qc) as [QTypeKey, QTypeState][]) {
+    if (v.enabled) out[KEY_TO_DB[k]] = { count: v.count, marksEach: v.marksEach };
+  }
+  return out;
+}
+
+interface ExamConfig {
+  id: string; title: string; description: string; generatedPrompt: string;
+  createdBy: string; isActive: boolean; createdAt: string;
+  questionConfig: Record<string, { count: number; marksEach: number }> | null;
+  totalMarks: number | null;
+}
 
 type Tab = "dashboard" | "configs" | "users" | "students";
 
@@ -34,23 +89,26 @@ export default function AdminPage() {
   const [sessions,  setSessions]  = useState<SessionRow[]>([]);
   const [users,     setUsers]     = useState<AdminUser[]>([]);
   const [configs,   setConfigs]   = useState<ExamConfig[]>([]);
-  const [studentIds, setStudentIds] = useState<{ studentId: string }[]>([]);
+  const [studentIds, setStudentIds] = useState<{ studentId: string; teacher: string | null }[]>([]);
 
   /* Student form */
-  const [newStudentId,   setNewStudentId]   = useState("");
-  const [studentBusy,    setStudentBusy]    = useState(false);
-  const [studentSearch,  setStudentSearch]  = useState("");
-  const [bulkText,       setBulkText]       = useState("");
-  const [bulkBusy,       setBulkBusy]       = useState(false);
-  const [bulkResult,     setBulkResult]     = useState("");
+  const [newStudentId,       setNewStudentId]       = useState("");
+  const [newStudentTeacher,  setNewStudentTeacher]  = useState("");
+  const [studentBusy,        setStudentBusy]        = useState(false);
+  const [studentSearch,      setStudentSearch]      = useState("");
+  const [teacherFilter,      setTeacherFilter]      = useState("");
+  const [bulkText,           setBulkText]           = useState("");
+  const [bulkBusy,           setBulkBusy]           = useState(false);
+  const [bulkResult,         setBulkResult]         = useState("");
+  const [bulkTeacher,        setBulkTeacher]        = useState("");
 
   /* Forms */
   const [newUser,     setNewUser]     = useState({ username: "", password: "" });
-  const [newConfig,   setNewConfig]   = useState({ title: "", prompt: "" });
+  const [newConfig,   setNewConfig]   = useState({ title: "", prompt: "", qconfig: DEFAULT_QCONFIG });
   const [configBusy,  setConfigBusy]  = useState(false);
   const [expandedId,  setExpandedId]  = useState<string | null>(null);
   const [editingId,   setEditingId]   = useState<string | null>(null);
-  const [editForm,    setEditForm]    = useState({ title: "", prompt: "" });
+  const [editForm,    setEditForm]    = useState({ title: "", prompt: "", qconfig: DEFAULT_QCONFIG });
   const [editBusy,    setEditBusy]    = useState(false);
 
   function flash(msg: string) { setToast(msg); setTimeout(() => setToast(""), 3500); }
@@ -88,12 +146,16 @@ export default function AdminPage() {
       setToken(t);
       setAuthed(true);
       fetchConfigs(t);
-      if (isSuperAdmin) { fetchUsers(t); fetchStudents(t); }
+      fetchStudents(t);
+      if (isSuperAdmin) fetchUsers(t);
     } catch { setAuthErr("Incorrect credentials."); }
   }
 
   useEffect(() => {
-    if (authed && isSuperAdmin && token) { fetchUsers(token); fetchStudents(token); }
+    if (authed && token) {
+      fetchStudents(token);
+      if (isSuperAdmin) fetchUsers(token);
+    }
   }, [authed, isSuperAdmin, token, fetchUsers, fetchStudents]);
 
   /* ── Students ── */
@@ -101,7 +163,9 @@ export default function AdminPage() {
     const id = newStudentId.trim().toUpperCase();
     if (!id) return;
     setStudentBusy(true);
-    const res  = await fetch("/api/admin/students", { method: "POST", headers: headers(token), body: JSON.stringify({ studentId: id }) });
+    const body: Record<string, string> = { studentId: id };
+    if (isSuperAdmin && newStudentTeacher) body.teacher = newStudentTeacher;
+    const res  = await fetch("/api/admin/students", { method: "POST", headers: headers(token), body: JSON.stringify(body) });
     const data = await res.json();
     if (res.ok) { flash(`Student "${id}" added.`); setNewStudentId(""); fetchStudents(token); }
     else flash(data.error);
@@ -109,14 +173,24 @@ export default function AdminPage() {
   }
   async function deleteStudent(id: string) {
     if (!confirm(`Remove student ID "${id}"?`)) return;
-    await fetch("/api/admin/students", { method: "DELETE", headers: headers(token), body: JSON.stringify({ studentId: id }) });
-    flash("Student removed."); fetchStudents(token);
+    const res = await fetch("/api/admin/students", { method: "DELETE", headers: headers(token), body: JSON.stringify({ studentId: id }) });
+    const data = await res.json();
+    if (res.ok) { flash("Student removed."); fetchStudents(token); }
+    else flash(data.error);
+  }
+  async function assignTeacher(studentId: string, teacher: string) {
+    const res  = await fetch("/api/admin/students", { method: "PATCH", headers: headers(token), body: JSON.stringify({ studentId, teacher: teacher || null }) });
+    const data = await res.json();
+    if (res.ok) { flash(`Student "${studentId}" assigned to "${teacher || "none"}".`); fetchStudents(token); }
+    else flash(data.error);
   }
   async function bulkUpload(ids: string[]) {
     const cleaned = ids.map((s) => s.trim().toUpperCase()).filter((s) => s.length >= 3);
     if (cleaned.length === 0) return;
     setBulkBusy(true); setBulkResult("");
-    const res  = await fetch("/api/admin/students", { method: "POST", headers: headers(token), body: JSON.stringify({ studentIds: cleaned }) });
+    const body: Record<string, unknown> = { studentIds: cleaned };
+    if (isSuperAdmin && bulkTeacher) body.teacher = bulkTeacher;
+    const res  = await fetch("/api/admin/students", { method: "POST", headers: headers(token), body: JSON.stringify(body) });
     const data = await res.json();
     if (res.ok) { setBulkResult(`✓ ${data.added} IDs uploaded successfully.`); setBulkText(""); fetchStudents(token); }
     else setBulkResult(`✗ ${data.error}`);
@@ -175,10 +249,13 @@ export default function AdminPage() {
   /* ── Exam Configs ── */
   async function createConfig() {
     if (!newConfig.title || !newConfig.prompt) return;
+    const total = calcTotal(newConfig.qconfig);
+    if (total === 0) { flash("Enable at least one question type."); return; }
     setConfigBusy(true);
-    const res  = await fetch("/api/admin/exam-configs", { method: "POST", headers: headers(token), body: JSON.stringify(newConfig) });
+    const body = { title: newConfig.title, prompt: newConfig.prompt, totalMarks: total, questionConfig: fromQConfig(newConfig.qconfig) };
+    const res  = await fetch("/api/admin/exam-configs", { method: "POST", headers: headers(token), body: JSON.stringify(body) });
     const data = await res.json();
-    if (res.ok) { flash("Config created!"); setNewConfig({ title: "", prompt: "" }); fetchConfigs(token); }
+    if (res.ok) { flash("Config created!"); setNewConfig({ title: "", prompt: "", qconfig: DEFAULT_QCONFIG }); fetchConfigs(token); }
     else flash(data.error);
     setConfigBusy(false);
   }
@@ -196,13 +273,16 @@ export default function AdminPage() {
   }
   function startEdit(c: ExamConfig) {
     setEditingId(c.id);
-    setEditForm({ title: c.title, prompt: c.generatedPrompt });
+    setEditForm({ title: c.title, prompt: c.generatedPrompt, qconfig: toQConfig(c.questionConfig) });
     setExpandedId(null);
   }
   async function saveEdit(id: string) {
     if (!editForm.title || !editForm.prompt) return;
+    const total = calcTotal(editForm.qconfig);
+    if (total === 0) { flash("Enable at least one question type."); return; }
     setEditBusy(true);
-    const res  = await fetch(`/api/admin/exam-configs/${id}`, { method: "PATCH", headers: headers(token), body: JSON.stringify(editForm) });
+    const body = { title: editForm.title, prompt: editForm.prompt, totalMarks: total, questionConfig: fromQConfig(editForm.qconfig) };
+    const res  = await fetch(`/api/admin/exam-configs/${id}`, { method: "PATCH", headers: headers(token), body: JSON.stringify(body) });
     const data = await res.json();
     if (res.ok) { flash("Config updated!"); setEditingId(null); fetchConfigs(token); }
     else flash(data.error);
@@ -280,7 +360,7 @@ export default function AdminPage() {
       {/* Tabs */}
       <div className="bg-white border-b border-slate-200 shadow-sm">
         <div className="max-w-6xl mx-auto px-6 flex gap-1">
-          {(["dashboard", "configs", ...(isSuperAdmin ? ["users", "students"] : [])] as Tab[]).map((t) => (
+          {(["dashboard", "configs", "students", ...(isSuperAdmin ? ["users"] : [])] as Tab[]).map((t) => (
             <button key={t} onClick={() => setTab(t)}
               className={`px-5 py-3.5 text-sm font-bold capitalize border-b-2 transition-colors ${tab === t ? "border-blue-600 text-blue-600" : "border-transparent text-slate-500 hover:text-slate-700"}`}>
               {t === "dashboard" ? "📊 Dashboard" : t === "configs" ? "⚙️ Exam Config" : t === "users" ? "👥 Users" : "🎓 Students"}
@@ -403,9 +483,49 @@ export default function AdminPage() {
                   className="w-full px-4 py-2.5 rounded-xl border-2 border-slate-200 focus:border-blue-500 focus:outline-none text-slate-900 text-sm resize-none transition-colors" />
                 <p className="text-xs text-slate-400 mt-1">This will be injected directly into the AI question generator.</p>
               </div>
+              {/* Question Type Config */}
+              <div>
+                <label className="block text-xs font-bold text-slate-600 uppercase tracking-wide mb-2">Question Types & Marks</label>
+                <div className="space-y-2">
+                  {QTYPES.map(({ key, label, icon }) => {
+                    const qt = newConfig.qconfig[key];
+                    return (
+                      <div key={key} className={`flex items-center gap-3 px-4 py-3 rounded-xl border-2 transition-all ${qt.enabled ? "border-blue-200 bg-blue-50/50" : "border-slate-200 bg-slate-50/30"}`}>
+                        <input type="checkbox" checked={qt.enabled}
+                          onChange={(e) => setNewConfig((p) => ({ ...p, qconfig: { ...p.qconfig, [key]: { ...qt, enabled: e.target.checked } } }))}
+                          className="w-4 h-4 accent-blue-600 cursor-pointer flex-shrink-0" />
+                        <span className="text-xs font-mono font-bold text-slate-400 w-8 flex-shrink-0">{icon}</span>
+                        <span className={`text-sm font-semibold flex-1 ${qt.enabled ? "text-slate-800" : "text-slate-400"}`}>{label}</span>
+                        {qt.enabled && (<>
+                          <div className="flex items-center gap-1.5">
+                            <span className="text-xs text-slate-500">Count</span>
+                            <input type="number" min={1} max={200} value={qt.count}
+                              onChange={(e) => setNewConfig((p) => ({ ...p, qconfig: { ...p.qconfig, [key]: { ...qt, count: Math.max(1, parseInt(e.target.value) || 1) } } }))}
+                              className="w-16 px-2 py-1.5 rounded-lg border border-slate-200 text-sm text-center font-bold focus:border-blue-400 focus:outline-none" />
+                          </div>
+                          <div className="flex items-center gap-1.5">
+                            <span className="text-xs text-slate-500">Marks each</span>
+                            <input type="number" min={1} max={20} value={qt.marksEach}
+                              onChange={(e) => setNewConfig((p) => ({ ...p, qconfig: { ...p.qconfig, [key]: { ...qt, marksEach: Math.max(1, parseInt(e.target.value) || 1) } } }))}
+                              className="w-14 px-2 py-1.5 rounded-lg border border-slate-200 text-sm text-center font-bold focus:border-blue-400 focus:outline-none" />
+                          </div>
+                          <span className="text-xs font-bold text-blue-600 bg-blue-100 px-2 py-1 rounded-lg w-20 text-center flex-shrink-0">
+                            = {qt.count * qt.marksEach}
+                          </span>
+                        </>)}
+                      </div>
+                    );
+                  })}
+                </div>
+                <div className="mt-2 flex items-center justify-between px-4 py-2.5 bg-slate-900 rounded-xl">
+                  <span className="text-xs font-semibold text-slate-400">Total Marks</span>
+                  <span className="text-base font-black text-white">{calcTotal(newConfig.qconfig)}</span>
+                </div>
+              </div>
+
               <button onClick={createConfig} disabled={configBusy || !newConfig.title || !newConfig.prompt}
                 className="px-6 py-2.5 bg-gradient-to-r from-blue-600 to-indigo-600 text-white font-bold rounded-xl hover:from-blue-700 hover:to-indigo-700 disabled:opacity-50 disabled:cursor-not-allowed text-sm transition-all shadow-sm">
-                Save Config
+                {configBusy ? "Saving..." : "Save Config"}
               </button>
             </div>
           </div>
@@ -435,6 +555,45 @@ export default function AdminPage() {
                           <textarea value={editForm.prompt} onChange={(e) => setEditForm((p) => ({ ...p, prompt: e.target.value }))} rows={6}
                             className="w-full px-3 py-2 rounded-xl border-2 border-blue-300 focus:border-blue-500 focus:outline-none text-slate-900 text-sm resize-none transition-colors" />
                         </div>
+                        {/* Question Type Config */}
+                        <div>
+                          <label className="block text-xs font-bold text-slate-500 uppercase tracking-wide mb-2">Question Types & Marks</label>
+                          <div className="space-y-2">
+                            {QTYPES.map(({ key, label, icon }) => {
+                              const qt = editForm.qconfig[key];
+                              return (
+                                <div key={key} className={`flex items-center gap-3 px-3 py-2.5 rounded-xl border-2 transition-all ${qt.enabled ? "border-blue-200 bg-blue-50/50" : "border-slate-200 bg-slate-50/30"}`}>
+                                  <input type="checkbox" checked={qt.enabled}
+                                    onChange={(e) => setEditForm((p) => ({ ...p, qconfig: { ...p.qconfig, [key]: { ...qt, enabled: e.target.checked } } }))}
+                                    className="w-4 h-4 accent-blue-600 cursor-pointer flex-shrink-0" />
+                                  <span className="text-xs font-mono font-bold text-slate-400 w-8 flex-shrink-0">{icon}</span>
+                                  <span className={`text-xs font-semibold flex-1 ${qt.enabled ? "text-slate-800" : "text-slate-400"}`}>{label}</span>
+                                  {qt.enabled && (<>
+                                    <div className="flex items-center gap-1">
+                                      <span className="text-xs text-slate-400">Count</span>
+                                      <input type="number" min={1} max={200} value={qt.count}
+                                        onChange={(e) => setEditForm((p) => ({ ...p, qconfig: { ...p.qconfig, [key]: { ...qt, count: Math.max(1, parseInt(e.target.value) || 1) } } }))}
+                                        className="w-14 px-2 py-1 rounded-lg border border-slate-200 text-xs text-center font-bold focus:border-blue-400 focus:outline-none" />
+                                    </div>
+                                    <div className="flex items-center gap-1">
+                                      <span className="text-xs text-slate-400">Marks</span>
+                                      <input type="number" min={1} max={20} value={qt.marksEach}
+                                        onChange={(e) => setEditForm((p) => ({ ...p, qconfig: { ...p.qconfig, [key]: { ...qt, marksEach: Math.max(1, parseInt(e.target.value) || 1) } } }))}
+                                        className="w-12 px-2 py-1 rounded-lg border border-slate-200 text-xs text-center font-bold focus:border-blue-400 focus:outline-none" />
+                                    </div>
+                                    <span className="text-xs font-bold text-blue-600 bg-blue-100 px-2 py-1 rounded-lg w-16 text-center flex-shrink-0">
+                                      = {qt.count * qt.marksEach}
+                                    </span>
+                                  </>)}
+                                </div>
+                              );
+                            })}
+                          </div>
+                          <div className="mt-2 flex items-center justify-between px-3 py-2 bg-slate-900 rounded-xl">
+                            <span className="text-xs font-semibold text-slate-400">Total Marks</span>
+                            <span className="font-black text-white">{calcTotal(editForm.qconfig)}</span>
+                          </div>
+                        </div>
                         <div className="flex gap-2">
                           <button onClick={() => saveEdit(c.id)} disabled={editBusy || !editForm.title || !editForm.prompt}
                             className="px-4 py-2 bg-gradient-to-r from-blue-600 to-indigo-600 text-white font-bold rounded-xl hover:from-blue-700 hover:to-indigo-700 disabled:opacity-50 text-xs transition-all flex items-center gap-1.5">
@@ -457,6 +616,19 @@ export default function AdminPage() {
                               {c.isActive && <span className="bg-green-100 text-green-700 text-xs font-bold px-2.5 py-0.5 rounded-full border border-green-200">● Active</span>}
                             </div>
                             <p className="text-xs text-slate-400">Created by {c.createdBy} · {new Date(c.createdAt).toLocaleDateString()}</p>
+                            {c.questionConfig && (
+                              <div className="flex flex-wrap gap-1.5 mt-1.5">
+                                {QTYPES.filter(({ key }) => (c.questionConfig as Record<string, unknown>)?.[key]).map(({ key, label }) => {
+                                  const qt = (c.questionConfig as Record<string, { count: number; marksEach: number }>)[key];
+                                  return (
+                                    <span key={key} className="text-xs bg-slate-100 text-slate-600 px-2 py-0.5 rounded-full font-medium">
+                                      {qt.count} {label} × {qt.marksEach}m
+                                    </span>
+                                  );
+                                })}
+                                {c.totalMarks && <span className="text-xs bg-blue-100 text-blue-700 px-2 py-0.5 rounded-full font-bold">{c.totalMarks} total marks</span>}
+                              </div>
+                            )}
                           </div>
                           <div className="flex gap-2 flex-shrink-0 flex-wrap justify-end">
                             <button onClick={() => setExpandedId(expandedId === c.id ? null : c.id)}
@@ -492,25 +664,41 @@ export default function AdminPage() {
           </div>
         </>)}
 
-        {/* ── STUDENTS TAB (super admin only) ── */}
-        {tab === "students" && isSuperAdmin && (() => {
-          const filtered = studentIds.filter((s) =>
-            s.studentId.toLowerCase().includes(studentSearch.toLowerCase())
-          );
+        {/* ── STUDENTS TAB ── */}
+        {tab === "students" && (() => {
+          const allTeachers = [...new Set(studentIds.map((s) => s.teacher).filter(Boolean))] as string[];
+          const filtered = studentIds.filter((s) => {
+            const matchId      = s.studentId.toLowerCase().includes(studentSearch.toLowerCase());
+            const matchTeacher = !teacherFilter || s.teacher === teacherFilter;
+            return matchId && matchTeacher;
+          });
+
           return (<>
             {/* Add Student */}
             <div className="bg-white rounded-2xl border border-slate-200 shadow-sm p-6">
-              <h2 className="font-black text-slate-900 mb-1">Add Student ID</h2>
-              <p className="text-slate-500 text-sm mb-4">Only registered IDs can take the exam.</p>
-              <div className="flex gap-3">
+              <h2 className="font-black text-slate-900 mb-1">Add Student</h2>
+              <p className="text-slate-500 text-sm mb-4">
+                {isSuperAdmin ? "Register a student and assign them to a teacher." : `Students you add will be assigned to you (${username}) automatically.`}
+              </p>
+              <div className="flex gap-3 flex-wrap">
                 <input
                   type="text"
                   value={newStudentId}
                   onChange={(e) => setNewStudentId(e.target.value.toUpperCase())}
                   onKeyDown={(e) => e.key === "Enter" && !studentBusy && addStudent()}
                   placeholder="e.g. AIT25-AI12-0001"
-                  className="flex-1 px-4 py-2.5 rounded-xl border-2 border-slate-200 focus:border-blue-500 focus:outline-none text-slate-900 font-mono text-sm tracking-wide transition-colors"
+                  className="flex-1 min-w-[180px] px-4 py-2.5 rounded-xl border-2 border-slate-200 focus:border-blue-500 focus:outline-none text-slate-900 font-mono text-sm tracking-wide transition-colors"
                 />
+                {isSuperAdmin && (
+                  <select
+                    value={newStudentTeacher}
+                    onChange={(e) => setNewStudentTeacher(e.target.value)}
+                    className="px-3 py-2.5 rounded-xl border-2 border-slate-200 focus:border-blue-500 focus:outline-none text-slate-700 text-sm transition-colors bg-white"
+                  >
+                    <option value="">-- No teacher --</option>
+                    {users.map((u) => <option key={u.id} value={u.username}>{u.username}</option>)}
+                  </select>
+                )}
                 <button onClick={addStudent} disabled={studentBusy || !newStudentId.trim()}
                   className="px-5 py-2.5 bg-gradient-to-r from-blue-600 to-indigo-600 text-white font-bold rounded-xl hover:from-blue-700 hover:to-indigo-700 disabled:opacity-50 text-sm shadow-sm transition-all flex items-center gap-2">
                   {studentBusy && <span className="w-3.5 h-3.5 border-2 border-white/30 border-t-white rounded-full animate-spin" />}
@@ -524,6 +712,19 @@ export default function AdminPage() {
               <h2 className="font-black text-slate-900 mb-1">Bulk Upload</h2>
               <p className="text-slate-500 text-sm mb-4">Paste multiple IDs (one per line or comma-separated), or upload a CSV file.</p>
               <div className="space-y-3">
+                {isSuperAdmin && (
+                  <div>
+                    <label className="block text-xs font-bold text-slate-500 uppercase tracking-wide mb-1.5">Assign Teacher (optional)</label>
+                    <select
+                      value={bulkTeacher}
+                      onChange={(e) => setBulkTeacher(e.target.value)}
+                      className="px-3 py-2 rounded-xl border-2 border-slate-200 focus:border-blue-500 focus:outline-none text-slate-700 text-sm transition-colors bg-white"
+                    >
+                      <option value="">-- No teacher --</option>
+                      {users.map((u) => <option key={u.id} value={u.username}>{u.username}</option>)}
+                    </select>
+                  </div>
+                )}
                 <textarea
                   value={bulkText}
                   onChange={(e) => setBulkText(e.target.value)}
@@ -541,7 +742,7 @@ export default function AdminPage() {
                     📂 Upload CSV
                     <input type="file" accept=".csv,.txt" className="hidden" onChange={handleCSV} />
                   </label>
-                  <span className="text-xs text-slate-400">Supports .csv or .txt — duplicates are skipped automatically</span>
+                  <span className="text-xs text-slate-400">Duplicates skipped automatically</span>
                 </div>
                 {bulkResult && (
                   <p className={`text-sm font-semibold px-4 py-2.5 rounded-xl ${bulkResult.startsWith("✓") ? "bg-green-50 text-green-700 border border-green-200" : "bg-red-50 text-red-700 border border-red-200"}`}>
@@ -553,18 +754,31 @@ export default function AdminPage() {
 
             {/* Student List */}
             <div className="bg-white rounded-2xl border border-slate-200 shadow-sm overflow-hidden">
-              <div className="px-5 py-4 border-b border-slate-100 flex items-center justify-between gap-3">
+              <div className="px-5 py-4 border-b border-slate-100 flex flex-wrap items-center justify-between gap-3">
                 <div className="flex items-center gap-3">
                   <h2 className="font-black text-slate-900">Registered Students</h2>
-                  <span className="text-xs font-semibold text-slate-400 bg-slate-100 px-2.5 py-1 rounded-full">{studentIds.length} total</span>
+                  <span className="text-xs font-semibold text-slate-400 bg-slate-100 px-2.5 py-1 rounded-full">{filtered.length} / {studentIds.length}</span>
                 </div>
-                <input
-                  type="text"
-                  value={studentSearch}
-                  onChange={(e) => setStudentSearch(e.target.value.toUpperCase())}
-                  placeholder="Search ID..."
-                  className="px-3 py-1.5 rounded-lg border border-slate-200 text-sm font-mono focus:outline-none focus:border-blue-400 w-44 transition-colors"
-                />
+                <div className="flex gap-2 flex-wrap">
+                  <input
+                    type="text"
+                    value={studentSearch}
+                    onChange={(e) => setStudentSearch(e.target.value.toUpperCase())}
+                    placeholder="Search ID..."
+                    className="px-3 py-1.5 rounded-lg border border-slate-200 text-sm font-mono focus:outline-none focus:border-blue-400 w-40 transition-colors"
+                  />
+                  {isSuperAdmin && (
+                    <select
+                      value={teacherFilter}
+                      onChange={(e) => setTeacherFilter(e.target.value)}
+                      className="px-3 py-1.5 rounded-lg border border-slate-200 text-sm focus:outline-none focus:border-blue-400 bg-white transition-colors"
+                    >
+                      <option value="">All teachers</option>
+                      <option value="">-- Unassigned --</option>
+                      {allTeachers.map((t) => <option key={t} value={t}>{t}</option>)}
+                    </select>
+                  )}
+                </div>
               </div>
 
               {filtered.length === 0 ? (
@@ -579,6 +793,7 @@ export default function AdminPage() {
                       <tr className="bg-slate-50 border-b border-slate-100">
                         <th className="px-4 py-3 text-xs font-bold text-slate-500 uppercase tracking-wide text-left">#</th>
                         <th className="px-4 py-3 text-xs font-bold text-slate-500 uppercase tracking-wide text-left">Student ID</th>
+                        <th className="px-4 py-3 text-xs font-bold text-slate-500 uppercase tracking-wide text-left">Teacher</th>
                         <th className="px-4 py-3 text-xs font-bold text-slate-500 uppercase tracking-wide text-right">Action</th>
                       </tr>
                     </thead>
@@ -587,9 +802,23 @@ export default function AdminPage() {
                         <tr key={s.studentId} className="hover:bg-slate-50/80 transition-colors">
                           <td className="px-4 py-3 text-slate-400 font-medium">{i + 1}</td>
                           <td className="px-4 py-3">
-                            <span className="font-mono font-bold text-blue-600 bg-blue-50 px-2.5 py-1 rounded-lg text-xs">
-                              {s.studentId}
-                            </span>
+                            <span className="font-mono font-bold text-blue-600 bg-blue-50 px-2.5 py-1 rounded-lg text-xs">{s.studentId}</span>
+                          </td>
+                          <td className="px-4 py-3">
+                            {isSuperAdmin ? (
+                              <select
+                                defaultValue={s.teacher ?? ""}
+                                onChange={(e) => assignTeacher(s.studentId, e.target.value)}
+                                className="px-2 py-1 rounded-lg border border-slate-200 text-xs text-slate-700 bg-white focus:outline-none focus:border-blue-400 transition-colors"
+                              >
+                                <option value="">-- none --</option>
+                                {users.map((u) => <option key={u.id} value={u.username}>{u.username}</option>)}
+                              </select>
+                            ) : (
+                              <span className={`text-xs font-semibold px-2 py-0.5 rounded-full ${s.teacher ? "bg-violet-50 text-violet-700" : "bg-slate-100 text-slate-400"}`}>
+                                {s.teacher ?? "unassigned"}
+                              </span>
+                            )}
                           </td>
                           <td className="px-4 py-3 text-right">
                             <button onClick={() => deleteStudent(s.studentId)}

@@ -5,10 +5,24 @@ import Link from "next/link";
 
 type Step = "idle" | "validating" | "generating" | "done" | "error";
 
+interface QuestionTypeConfig { count: number; marksEach: number; }
 interface ExamConfig {
-  id:        string;
-  title:     string;
-  createdBy: string;
+  id:             string;
+  title:          string;
+  createdBy:      string;
+  questionConfig: Partial<Record<"mcq" | "true_false" | "fill_blank" | "code", QuestionTypeConfig>> | null;
+}
+
+function buildGeneratingLabel(config: ExamConfig | null): string {
+  if (!config?.questionConfig) return "AI generating questions (15–20s)";
+  const qc = config.questionConfig;
+  const parts: string[] = [];
+  if (qc.mcq?.count)        parts.push(`${qc.mcq.count} MCQ`);
+  if (qc.true_false?.count) parts.push(`${qc.true_false.count} True/False`);
+  if (qc.fill_blank?.count) parts.push(`${qc.fill_blank.count} Fill Blank`);
+  if (qc.code?.count)       parts.push(`${qc.code.count} Code`);
+  const total = (qc.mcq?.count ?? 0) + (qc.true_false?.count ?? 0) + (qc.fill_blank?.count ?? 0) + (qc.code?.count ?? 0);
+  return `AI generating ${total} questions: ${parts.join(", ")} (15–20s)`;
 }
 
 export default function StartPage() {
@@ -223,7 +237,7 @@ export default function StartPage() {
             <div className="bg-blue-50 border border-blue-200 rounded-xl px-4 py-3 space-y-2">
               {[
                 { s: "validating", label: "Validating Student ID" },
-                { s: "generating", label: "AI generating 40 unique questions (15–20s)" },
+                { s: "generating", label: buildGeneratingLabel(selectedConfig) },
               ].map(({ s, label }) => {
                 const steps: Step[] = ["validating", "generating", "done"];
                 const current = steps.indexOf(step);

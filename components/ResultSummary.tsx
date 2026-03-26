@@ -49,7 +49,7 @@ export default function ResultSummary({ result }: { result: ExamResult }) {
         )}
       </span>
 
-      <p className="text-slate-500 text-xs mt-3">Pass mark: 25 / 80</p>
+      <p className="text-slate-500 text-xs mt-3">Pass mark: {result.passScore} / {totalMarks}</p>
     </div>
   );
 }

@@ -2,7 +2,6 @@ import { NextRequest, NextResponse } from "next/server";
 import { z } from "zod";
 import { db } from "@/lib/db";
 import { gradeExam } from "@/lib/grader";
-import type { TopicKey } from "@/types/exam";
 
 const Schema = z.object({ studentId: z.string().min(1).trim().toUpperCase() });
 
@@ -31,13 +30,17 @@ export async function POST(req: NextRequest) {
     });
 
     const gradingInput = questions.map((q) => ({
-      id:            q.id,
-      topic:         q.topic,
-      correctAnswer: q.correctAnswer!,
-      studentAnswer: q.studentAnswer ?? null,
+      id:                q.id,
+      topic:             q.topic,
+      questionType:      q.questionType ?? "mcq",
+      correctAnswer:     q.correctAnswer ?? "",
+      studentAnswer:     q.studentAnswer ?? null,
+      studentAnswerText: q.studentAnswerText ?? null,
+      marks:             q.marks ?? 2,
+      aiScore:           q.aiScore ?? null,
     }));
 
-    const graded = gradeExam(gradingInput);
+    const graded = gradeExam(gradingInput, session.totalMarks);
 
     const topicBreakdown = Object.fromEntries(
       Object.entries(graded.topicBreakdown).map(([topic, stats]) => [
@@ -46,19 +49,36 @@ export async function POST(req: NextRequest) {
       ])
     );
 
-    const resultQuestions = questions.map((q) => ({
-      id:            q.id,
-      topic:         q.topic as TopicKey,
-      question:      q.question,
-      optionA:       q.optionA,
-      optionB:       q.optionB,
-      optionC:       q.optionC,
-      optionD:       q.optionD,
-      orderIndex:    q.orderIndex,
-      correctAnswer: q.correctAnswer,
-      studentAnswer: q.studentAnswer ?? null,
-      isCorrect:     q.studentAnswer === q.correctAnswer,
-    }));
+    const resultQuestions = questions.map((q) => {
+      const qtype        = q.questionType ?? "mcq";
+      const isAutoGraded = qtype === "mcq" || qtype === "true_false";
+      const isCorrect    = isAutoGraded
+        ? (q.studentAnswer ?? null) === q.correctAnswer
+        : (q.aiScore ?? 0) >= (q.marks ?? 2);
+      const earnedMarks  = isAutoGraded
+        ? (isCorrect ? (q.marks ?? 2) : 0)
+        : (q.aiScore ?? 0);
+
+      return {
+        id:                q.id,
+        topic:             q.topic,
+        question:          q.question,
+        questionType:      qtype,
+        marks:             q.marks ?? 2,
+        optionA:           q.optionA,
+        optionB:           q.optionB,
+        optionC:           q.optionC,
+        optionD:           q.optionD,
+        orderIndex:        q.orderIndex,
+        correctAnswer:     q.correctAnswer ?? "",
+        modelAnswer:       q.modelAnswer   ?? null,
+        studentAnswer:     q.studentAnswer ?? null,
+        studentAnswerText: q.studentAnswerText ?? null,
+        aiScore:           q.aiScore ?? null,
+        isCorrect,
+        earnedMarks,
+      };
+    });
 
     return NextResponse.json({
       announced:      true,
@@ -69,6 +89,7 @@ export async function POST(req: NextRequest) {
       totalMarks:     graded.totalMarks,
       percentage:     graded.percentage,
       passed:         graded.passed,
+      passScore:      graded.passScore,
       submittedAt:    session.submittedAt?.toISOString(),
       topicBreakdown,
       questions:      resultQuestions,

@@ -10,9 +10,10 @@ export async function GET() {
 
   return NextResponse.json({
     configs: configs.map((c) => ({
-      id:        c.id,
-      title:     c.title,
-      createdBy: c.createdBy,
+      id:             c.id,
+      title:          c.title,
+      createdBy:      c.createdBy,
+      questionConfig: c.questionConfig ?? null,
     })),
   });
 }

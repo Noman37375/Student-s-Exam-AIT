@@ -18,10 +18,14 @@ export async function POST(req: NextRequest, { params }: { params: Promise<{ id:
   return NextResponse.json({ success: true });
 }
 
-// PATCH /api/admin/exam-configs/[id] — edit title & prompt
+// PATCH /api/admin/exam-configs/[id] — edit title, prompt, questionConfig, totalMarks
+const QTypeSchema = z.object({ count: z.number().int().min(1), marksEach: z.number().int().min(1) });
+
 const EditSchema = z.object({
-  title:  z.string().min(2).max(100).trim(),
-  prompt: z.string().min(20).max(3000).trim(),
+  title:          z.string().min(2).max(100).trim(),
+  prompt:         z.string().min(20).max(5000).trim(),
+  totalMarks:     z.number().int().min(1),
+  questionConfig: z.record(z.string(), QTypeSchema),
 });
 
 export async function PATCH(req: NextRequest, { params }: { params: Promise<{ id: string }> }) {
@@ -30,16 +34,15 @@ export async function PATCH(req: NextRequest, { params }: { params: Promise<{ id
 
   const { id } = await params;
 
-  // Only super admin or the creator can edit
   const config = await db.query.examConfigs.findFirst({ where: (c, { eq }) => eq(c.id, id) });
   if (!config) return NextResponse.json({ error: "Not found." }, { status: 404 });
   if (!auth.isSuperAdmin && config.createdBy !== auth.username)
     return NextResponse.json({ error: "Unauthorized." }, { status: 403 });
 
   try {
-    const { title, prompt } = EditSchema.parse(await req.json());
+    const { title, prompt, totalMarks, questionConfig } = EditSchema.parse(await req.json());
     await db.update(examConfigs)
-      .set({ title, description: prompt, generatedPrompt: prompt })
+      .set({ title, description: prompt, generatedPrompt: prompt, totalMarks, questionConfig })
       .where(eq(examConfigs.id, id));
     return NextResponse.json({ success: true });
   } catch (err) {

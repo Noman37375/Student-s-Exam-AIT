@@ -5,7 +5,7 @@ import { useParams } from "next/navigation";
 import ExamCard from "@/components/ExamCard";
 import ExamNav from "@/components/ExamNav";
 import ExamTimer from "@/components/ExamTimer";
-import type { ExamQuestion, AnswerOption, ExamSession } from "@/types/exam";
+import type { ExamQuestion, ExamSession } from "@/types/exam";
 
 export default function ExamPage() {
   const params = useParams<{ sessionId: string }>();
@@ -13,7 +13,7 @@ export default function ExamPage() {
 
   const [session,      setSession]      = useState<ExamSession | null>(null);
   const [loadError,    setLoadError]    = useState("");
-  const [answers,      setAnswers]      = useState<Record<string, AnswerOption>>({});
+  const [answers,      setAnswers]      = useState<Record<string, string>>({});
   const [currentIndex, setCurrentIndex] = useState(0);
   const [submitting,   setSubmitting]   = useState(false);
   const [submitError,  setSubmitError]  = useState("");
@@ -93,7 +93,7 @@ export default function ExamPage() {
     );
   }
 
-  const { questions, durationMinutes } = session!;
+  const { questions, durationMinutes, totalMarks } = session!;
   const currentQuestion: ExamQuestion = questions[currentIndex];
   const answeredCount  = Object.keys(answers).length;
   const allAnswered    = answeredCount === questions.length;
@@ -148,7 +148,10 @@ export default function ExamPage() {
               questionNumber={currentIndex + 1}
               totalQuestions={questions.length}
               selectedAnswer={answers[currentQuestion.id] ?? null}
-              onAnswer={(ans) => setAnswers((prev) => ({ ...prev, [currentQuestion.id]: ans }))}
+              onAnswer={(ans) => {
+                if (ans.trim() === "") { setAnswers((prev) => { const n = { ...prev }; delete n[currentQuestion.id]; return n; }); }
+                else setAnswers((prev) => ({ ...prev, [currentQuestion.id]: ans }));
+              }}
             />
           </div>
 
@@ -224,12 +227,8 @@ export default function ExamPage() {
                   <span className="font-semibold text-slate-700">{questions.length}</span>
                 </div>
                 <div className="flex justify-between text-xs">
-                  <span className="text-slate-500">Marks per Question</span>
-                  <span className="font-semibold text-slate-700">2</span>
-                </div>
-                <div className="flex justify-between text-xs">
                   <span className="text-slate-500">Total Marks</span>
-                  <span className="font-semibold text-slate-700">{questions.length * 2}</span>
+                  <span className="font-semibold text-slate-700">{totalMarks ?? questions.reduce((s, q) => s + (q.marks ?? 2), 0)}</span>
                 </div>
                 <div className="flex justify-between text-xs">
                   <span className="text-slate-500">Duration</span>
@@ -254,7 +253,7 @@ export default function ExamPage() {
               <h3 className="text-lg font-bold text-slate-900">Submit Exam?</h3>
               <p className="text-slate-500 text-sm mt-2 leading-relaxed">
                 You have answered all <strong className="text-slate-800">{questions.length}</strong> questions
-                for a possible <strong className="text-slate-800">{questions.length * 2}</strong> marks.
+                for a possible <strong className="text-slate-800">{totalMarks ?? questions.reduce((s, q) => s + (q.marks ?? 2), 0)}</strong> marks.
                 This action cannot be undone.
               </p>
             </div>

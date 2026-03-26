@@ -17,9 +17,13 @@ export async function GET(req: NextRequest) {
   return NextResponse.json({ configs });
 }
 
+const QTypeSchema = z.object({ count: z.number().int().min(1), marksEach: z.number().int().min(1) });
+
 const CreateSchema = z.object({
-  title:  z.string().min(2).max(100).trim(),
-  prompt: z.string().min(20).max(3000).trim(),
+  title:          z.string().min(2).max(100).trim(),
+  prompt:         z.string().min(20).max(5000).trim(),
+  totalMarks:     z.number().int().min(1),
+  questionConfig: z.record(z.string(), QTypeSchema),
 });
 
 export async function POST(req: NextRequest) {
@@ -27,7 +31,7 @@ export async function POST(req: NextRequest) {
   if (!auth.valid) return NextResponse.json({ error: "Unauthorized." }, { status: 401 });
 
   try {
-    const { title, prompt } = CreateSchema.parse(await req.json());
+    const { title, prompt, totalMarks, questionConfig } = CreateSchema.parse(await req.json());
 
     const [config] = await db.insert(examConfigs).values({
       title,
@@ -35,6 +39,8 @@ export async function POST(req: NextRequest) {
       generatedPrompt: prompt,
       createdBy:       auth.username,
       isActive:        false,
+      totalMarks,
+      questionConfig,
     }).returning();
 
     return NextResponse.json({ config });

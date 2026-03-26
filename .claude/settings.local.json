@@ -5,7 +5,8 @@
       "Bash(npm install:*)",
       "mcp__Neon__run_sql",
       "Bash(cd \"C:/Users/user/Documents/Student's Exam\" && node -e \"const z = require\\('zod'\\); console.log\\(JSON.stringify\\(Object.keys\\(z\\)\\)\\)\" 2>&1 | head -5)",
-      "Bash(cd \"C:\\\\Users\\\\user\\\\Documents\\\\Student's Exam\" && npx tsc --noEmit 2>&1 | head -50)"
+      "Bash(cd \"C:\\\\Users\\\\user\\\\Documents\\\\Student's Exam\" && npx tsc --noEmit 2>&1 | head -50)",
+      "mcp__Neon__run_sql_transaction"
     ]
   }
 }

@@ -1,8 +1,9 @@
 import OpenAI from "openai";
 import { z } from "zod";
-import { buildCustomMCQPrompt } from "./prompts";
+import { getPromptBuilder, type QuestionConfig, type QuestionTypeKey } from "./prompts";
 
-// Collect all configured Groq API keys: GROQ_API_KEY, GROQ_API_KEY_2, GROQ_API_KEY_3, ...
+// ─── API key rotation ────────────────────────────────────────────────────────
+
 function getApiKeys(): string[] {
   const keys: string[] = [];
   if (process.env.GROQ_API_KEY) keys.push(process.env.GROQ_API_KEY);
@@ -13,8 +14,28 @@ function getApiKeys(): string[] {
   return keys;
 }
 
-const RawQuestionSchema = z.object({
-  question:       z.string().min(5),
+// ─── Generated question shape ────────────────────────────────────────────────
+
+export interface GeneratedQuestion {
+  type:           QuestionTypeKey;
+  topic:          string;
+  question:       string;
+  marks:          number;
+  // MCQ / TF
+  option_a?:      string;
+  option_b?:      string;
+  option_c?:      string;
+  option_d?:      string;
+  correct_answer?: string;
+  // Fill / Code
+  model_answer?:  string;
+}
+
+// ─── Zod schemas per type ────────────────────────────────────────────────────
+
+const BaseSchema = z.object({ type: z.string(), topic: z.string().min(1), question: z.string().min(5) });
+
+const MCQSchema = BaseSchema.extend({
   option_a:       z.string().min(1),
   option_b:       z.string().min(1),
   option_c:       z.string().min(1),
@@ -22,19 +43,23 @@ const RawQuestionSchema = z.object({
   correct_answer: z.enum(["A", "B", "C", "D"]),
 });
 
-const RawQuestionWithTopicSchema = RawQuestionSchema.extend({
-  topic: z.string().min(1),
+const TFSchema = BaseSchema.extend({
+  correct_answer: z.enum(["True", "False"]),
 });
 
-export type RawQuestion = z.infer<typeof RawQuestionSchema>;
-export type RawQuestionWithTopic = z.infer<typeof RawQuestionWithTopicSchema>;
+const FillSchema  = BaseSchema.extend({ model_answer: z.string().min(1) });
+const CodeSchema  = BaseSchema.extend({ model_answer: z.string().min(1) });
 
-// Variety hints ensure each parallel batch targets different question styles/depths
-const BATCH_HINTS = [
-  "Focus on DEFINITIONS and SYNTAX questions — cover the most foundational subtopics of each area.",
-  "Focus on FILL-IN-THE-BLANK and CODE OUTPUT PREDICTION questions — cover intermediate subtopics. Do not repeat basic definitions.",
-  "Focus on SCENARIO-BASED and APPLICATION questions — cover advanced or applied subtopics. Avoid questions that test only simple recall.",
-] as const;
+function getSchema(type: QuestionTypeKey) {
+  switch (type) {
+    case "mcq":        return MCQSchema;
+    case "true_false": return TFSchema;
+    case "fill_blank": return FillSchema;
+    case "code":       return CodeSchema;
+  }
+}
+
+// ─── Helpers ─────────────────────────────────────────────────────────────────
 
 function shuffle<T>(arr: T[]): T[] {
   for (let i = arr.length - 1; i > 0; i--) {
@@ -44,10 +69,9 @@ function shuffle<T>(arr: T[]): T[] {
   return arr;
 }
 
-function deduplicateQuestions(questions: RawQuestionWithTopic[]): RawQuestionWithTopic[] {
+function deduplicateQuestions(questions: GeneratedQuestion[]): GeneratedQuestion[] {
   const seen = new Set<string>();
   return questions.filter((q) => {
-    // Normalize: lowercase, collapse whitespace, strip punctuation
     const key = q.question.toLowerCase().replace(/[^\w\s]/g, "").replace(/\s+/g, " ").trim();
     if (seen.has(key)) return false;
     seen.add(key);
@@ -55,7 +79,9 @@ function deduplicateQuestions(questions: RawQuestionWithTopic[]): RawQuestionWit
   });
 }
 
-async function callGroq(prompt: string, maxTokens = 4096): Promise<string> {
+// ─── LLM call with key rotation ──────────────────────────────────────────────
+
+async function callGroq(prompt: string, maxTokens = 4096, temperature = 0.7): Promise<string> {
   const keys = getApiKeys();
   if (keys.length === 0) throw new Error("No GROQ_API_KEY configured.");
 
@@ -63,74 +89,128 @@ async function callGroq(prompt: string, maxTokens = 4096): Promise<string> {
   for (const apiKey of keys) {
     try {
       const client = new OpenAI({ apiKey, baseURL: "https://api.groq.com/openai/v1" });
-      const response = await client.chat.completions.create({
-        model: "llama-3.3-70b-versatile",
-        messages: [{ role: "user", content: prompt }],
-        temperature: 0.7,
-        max_tokens: maxTokens,
+      const res = await client.chat.completions.create({
+        model:       "llama-3.3-70b-versatile",
+        messages:    [{ role: "user", content: prompt }],
+        temperature,
+        max_tokens:  maxTokens,
       });
-      return response.choices[0]?.message?.content ?? "";
+      return res.choices[0]?.message?.content ?? "";
     } catch (err) {
       const status = (err as { status?: number })?.status;
-      // Fallback on rate-limit or server overload; rethrow anything else
-      if (status === 429 || status === 503) {
-        lastError = err;
-        continue;
-      }
+      if (status === 429 || status === 503) { lastError = err; continue; }
       throw err;
     }
   }
-
   throw lastError ?? new Error("All Groq API keys exhausted.");
 }
 
-async function fetchBatch(configPrompt: string, n: number, batchHint?: string): Promise<RawQuestionWithTopic[]> {
-  const hint = batchHint ? `\n\nBATCH INSTRUCTION: ${batchHint}` : "";
-  const prompt = `${buildCustomMCQPrompt(configPrompt, n)}${hint}\n\nCRITICAL: Return ONLY a raw JSON array of exactly ${n} objects. No markdown, no extra text.`;
+// ─── Fetch a batch of one question type ──────────────────────────────────────
+
+const BATCH_HINTS = [
+  "Focus on DEFINITIONS and SYNTAX — cover foundational subtopics.",
+  "Focus on CODE OUTPUT and APPLICATION — cover intermediate subtopics. Avoid repeating basic definitions.",
+  "Focus on SCENARIOS and ADVANCED concepts — cover applied subtopics. Avoid questions already covered in simpler batches.",
+] as const;
+
+const BATCH_TEMPS = [0.6, 0.75, 0.9] as const;
+
+async function fetchTypeBatch(
+  type: QuestionTypeKey,
+  teacherPrompt: string,
+  count: number,
+  batchIndex = 0,
+): Promise<GeneratedQuestion[]> {
+  const hint     = BATCH_HINTS[batchIndex % 3];
+  const temp     = BATCH_TEMPS[batchIndex % 3];
+  const builder  = getPromptBuilder(type);
+  const schema   = getSchema(type);
+  const prompt   = `${builder(teacherPrompt, count)}\n\nBATCH INSTRUCTION: ${hint}\n\nCRITICAL: Return ONLY a raw JSON array of exactly ${count} objects. No markdown.`;
 
   const parse = (r: string) => {
     const cleaned = r.replace(/```json\s*/gi, "").replace(/```\s*/gi, "").trim();
     const parsed  = JSON.parse(cleaned);
     if (!Array.isArray(parsed)) throw new Error("Not an array");
-    return z.array(RawQuestionWithTopicSchema).parse(parsed);
+    return z.array(schema).parse(parsed) as GeneratedQuestion[];
   };
 
-  let raw = await callGroq(prompt, 4096);
+  let raw = await callGroq(prompt, 4096, temp);
   try {
     const qs = parse(raw);
-    if (qs.length >= n - 1) return qs.slice(0, n);
+    if (qs.length >= count - 1) return qs.slice(0, count);
     throw new Error(`Only got ${qs.length}`);
   } catch {
-    // Retry once
-    raw = await callGroq(prompt, 4096);
-    return parse(raw).slice(0, n);
+    raw = await callGroq(prompt, 4096, temp);
+    return parse(raw).slice(0, count);
   }
 }
 
-// 3 parallel calls: 14 + 13 + 13 = 40
+// ─── Main entry ──────────────────────────────────────────────────────────────
+
 export async function generateAllQuestions(
-  configPrompt?: string | null,
-): Promise<RawQuestionWithTopic[]> {
-  if (!configPrompt) {
-    throw new Error("No exam configuration provided. Please select a teacher.");
+  teacherPrompt: string | null | undefined,
+  questionConfig?: QuestionConfig | null,
+): Promise<GeneratedQuestion[]> {
+  if (!teacherPrompt) throw new Error("No exam configuration provided.");
+
+  // Build per-type batch plan — 3 parallel batches per type where count > 14
+  type BatchJob = { type: QuestionTypeKey; count: number; batchIdx: number; marks: number };
+  const jobs: BatchJob[] = [];
+
+  // Default: pure MCQ if no questionConfig provided
+  const config: QuestionConfig = questionConfig && Object.keys(questionConfig).length > 0
+    ? questionConfig
+    : { mcq: { count: 40, marksEach: 2 } };
+
+  const VALID_TYPES = new Set<string>(["mcq", "true_false", "fill_blank", "code"]);
+
+  let batchIdx = 0;
+  for (const [typeKey, cfg] of Object.entries(config) as [QuestionTypeKey, { count: number; marksEach: number }][]) {
+    if (!VALID_TYPES.has(typeKey)) continue;  // skip legacy camelCase keys
+    if (!cfg || cfg.count <= 0) continue;
+    const { count, marksEach } = cfg;
+
+    if (count <= 14) {
+      jobs.push({ type: typeKey, count, batchIdx: batchIdx++, marks: marksEach });
+    } else {
+      // Split into batches of ~14
+      const batches = Math.ceil(count / 14);
+      const base    = Math.floor(count / batches);
+      let remaining = count;
+      for (let b = 0; b < batches; b++) {
+        const bCount = b === batches - 1 ? remaining : base;
+        jobs.push({ type: typeKey, count: bCount, batchIdx: batchIdx++, marks: marksEach });
+        remaining -= bCount;
+      }
+    }
   }
 
-  const [batch1, batch2, batch3] = await Promise.all([
-    fetchBatch(configPrompt, 14, BATCH_HINTS[0]),
-    fetchBatch(configPrompt, 13, BATCH_HINTS[1]),
-    fetchBatch(configPrompt, 13, BATCH_HINTS[2]),
-  ]);
+  // Run all batches in parallel
+  const results = await Promise.all(
+    jobs.map(({ type, count, batchIdx: bi, marks }) =>
+      fetchTypeBatch(type, teacherPrompt, count, bi).then((qs) =>
+        qs.map((q) => ({ ...q, type, marks }))
+      )
+    )
+  );
 
-  let questions = deduplicateQuestions([...batch1, ...batch2, ...batch3]);
+  let questions = deduplicateQuestions(results.flat());
 
-  // Top-up loop — retry up to 3 times, ask for a few extra to absorb deduplication losses
-  for (let attempt = 0; attempt < 3 && questions.length < 40; attempt++) {
-    const missing = 40 - questions.length;
+  // Per-type top-up if deduplication caused shortfall
+  const totalNeeded = Object.values(config).reduce((s, c) => s + (c?.count ?? 0), 0);
+  if (questions.length < totalNeeded) {
+    const missing = totalNeeded - questions.length;
     try {
-      const extra = await fetchBatch(configPrompt, missing + 3); // +3 buffer for dedup losses
-      questions   = deduplicateQuestions([...questions, ...extra]);
-    } catch { break; }
+      // Top-up with MCQ (or first available type)
+      const topUpType = (Object.keys(config)[0] as QuestionTypeKey) ?? "mcq";
+      const topUpMarks = config[topUpType]?.marksEach ?? 2;
+      const extra = await fetchTypeBatch(topUpType, teacherPrompt, missing + 3);
+      questions = deduplicateQuestions([
+        ...questions,
+        ...extra.map((q) => ({ ...q, type: topUpType, marks: topUpMarks })),
+      ]);
+    } catch { /* use what we have */ }
   }
 
-  return shuffle(questions.slice(0, 40));
+  return shuffle(questions.slice(0, totalNeeded));
 }

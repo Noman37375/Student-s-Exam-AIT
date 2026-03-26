@@ -1,8 +1,9 @@
-import { pgTable, uuid, text, integer, smallint, timestamp, char, boolean } from "drizzle-orm/pg-core";
+import { pgTable, uuid, text, integer, smallint, timestamp, boolean, jsonb } from "drizzle-orm/pg-core";
 import { sql } from "drizzle-orm";
 
 export const students = pgTable("students", {
   studentId: text("student_id").primaryKey(),
+  teacher:   text("teacher"),
   createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
 });
 
@@ -20,17 +21,22 @@ export const examSessions = pgTable("exam_sessions", {
 });
 
 export const examQuestions = pgTable("exam_questions", {
-  id:            uuid("id").primaryKey().default(sql`gen_random_uuid()`),
-  sessionId:     uuid("session_id").notNull().references(() => examSessions.id, { onDelete: "cascade" }),
-  topic:         text("topic").notNull(),
-  question:      text("question").notNull(),
-  optionA:       text("option_a").notNull(),
-  optionB:       text("option_b").notNull(),
-  optionC:       text("option_c").notNull(),
-  optionD:       text("option_d").notNull(),
-  correctAnswer: char("correct_answer", { length: 1 }).notNull(),
-  studentAnswer: char("student_answer", { length: 1 }),
-  orderIndex:    smallint("order_index").notNull(),
+  id:                uuid("id").primaryKey().default(sql`gen_random_uuid()`),
+  sessionId:         uuid("session_id").notNull().references(() => examSessions.id, { onDelete: "cascade" }),
+  topic:             text("topic").notNull(),
+  question:          text("question").notNull(),
+  optionA:           text("option_a").notNull(),
+  optionB:           text("option_b").notNull(),
+  optionC:           text("option_c").notNull(),
+  optionD:           text("option_d").notNull(),
+  correctAnswer:     text("correct_answer").notNull(),
+  studentAnswer:     text("student_answer"),
+  orderIndex:        smallint("order_index").notNull(),
+  questionType:      text("question_type").notNull().default("mcq"),
+  marks:             smallint("marks").notNull().default(2),
+  modelAnswer:       text("model_answer"),
+  studentAnswerText: text("student_answer_text"),
+  aiScore:           integer("ai_score"),
 });
 
 export const adminUsers = pgTable("admin_users", {
@@ -48,4 +54,6 @@ export const examConfigs = pgTable("exam_configs", {
   createdBy:       text("created_by").notNull(),
   isActive:        boolean("is_active").notNull().default(false),
   createdAt:       timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+  questionConfig:  jsonb("question_config"),
+  totalMarks:      integer("total_marks"),
 });
